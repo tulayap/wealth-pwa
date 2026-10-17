@@ -1,0 +1,134 @@
+<!doctype html><html lang="th"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>WEALTH Desktop</title>
+<link rel="manifest" href="desktop.webmanifest">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="WEALTH">
+<meta name="theme-color" content="#faf9f5">
+<link rel="apple-touch-icon" href="../icon-180.png">
+<link rel="icon" href="../icon-192.png">
+<style>
+* { box-sizing:border-box; margin:0; -webkit-tap-highlight-color:transparent }
+html,body { height:100%; background:#faf9f5 }
+body { font-family:-apple-system,'Sukhumvit Set','Noto Sans Thai',sans-serif; color:#171613;
+  max-width:480px; margin:0 auto; display:flex; flex-direction:column; min-height:100dvh;
+  padding:max(24px, env(safe-area-inset-top)) 22px 24px }
+.brand { font-size:12px; font-weight:600; letter-spacing:.16em; margin-top:14px }
+.mut { color:#9a9891; font-size:13px; margin-top:6px }
+.box { margin-top:28px; display:none }
+.box.on { display:block }
+label { display:block; font-size:13px; color:#7d7b75; margin-bottom:8px }
+input { width:100%; font:inherit; font-size:15px; padding:12px 14px; border:1px solid #d9d7d0;
+  border-radius:10px; background:#fff; color:#171613 }
+button { margin-top:12px; width:100%; font:inherit; font-size:15px; font-weight:600; padding:13px;
+  border:0; border-radius:10px; background:#171613; color:#fff }
+.err { color:#c8452f; font-size:13px; margin-top:12px; white-space:pre-wrap }
+.spin { width:18px; height:18px; border:2px solid #d9d7d0; border-top-color:#171613; border-radius:50%;
+  animation:sp .8s linear infinite; margin-top:28px }
+@keyframes sp { to { transform:rotate(360deg) } }
+</style></head><body>
+<div class="brand">WEALTH · DESKTOP</div>
+<div class="mut" id="st">กำลังเปิด…</div>
+<div class="spin" id="spin"></div>
+<div class="box" id="keybox">
+  <label>ยังไม่มีคีย์ในเครื่องนี้ — สแกน QR จาก Mac (python3 ~/wealth/pwa_link.py) แล้วกด Add to Home Screen จากหน้าที่เปิดขึ้น · หรือวางคีย์จาก secrets/pwa_key.txt</label>
+  <input id="k" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="คีย์">
+  <button id="go">เปิด</button>
+</div>
+<div class="err" id="err"></div>
+<script>
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  function st(m){ $('st').textContent = m; }
+  function err(m){ $('err').textContent = m; $('spin').style.display='none'; }
+  function b64u(s){ s = s.replace(/-/g,'+').replace(/_/g,'/'); while (s.length % 4) s += '=';
+    var b = atob(s), a = new Uint8Array(b.length); for (var i=0;i<b.length;i++) a[i]=b.charCodeAt(i); return a; }
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('../sw.js').catch(function(){});
+  }
+
+  /* ── key store (IndexedDB · CryptoKey non-extractable) ── */
+  function idb(){ return new Promise(function(res, rej){
+    var r = indexedDB.open('wealth-pwa', 1);
+    r.onupgradeneeded = function(){ r.result.createObjectStore('kv'); };
+    r.onsuccess = function(){ res(r.result); }; r.onerror = function(){ rej(r.error); };
+  }); }
+  function kvGet(k){ return idb().then(function(db){ return new Promise(function(res, rej){
+    var t = db.transaction('kv').objectStore('kv').get(k);
+    t.onsuccess = function(){ res(t.result); }; t.onerror = function(){ rej(t.error); }; }); }); }
+  function kvSet(k, v){ return idb().then(function(db){ return new Promise(function(res, rej){
+    var t = db.transaction('kv','readwrite').objectStore('kv').put(v, k);
+    t.onsuccess = function(){ res(); }; t.onerror = function(){ rej(t.error); }; }); }); }
+  function importKey(str){
+    var raw = b64u(str.trim());
+    if (raw.length !== 32) return Promise.reject(new Error('คีย์ต้องยาว 32 ไบต์ (ได้ ' + raw.length + ')'));
+    return crypto.subtle.importKey('raw', raw, {name:'AES-GCM'}, false, ['decrypt']);
+  }
+
+  /* ── open the app: fetch app.enc → decrypt → gunzip → become the app ── */
+  function openApp(key){
+    st('กำลังโหลดข้อมูล…');
+    var fromCache = false;
+    return fetch('../dash.enc', {cache:'no-store'}).then(function(r){
+      if (!r.ok) throw new Error('โหลด app.enc ไม่ได้ (' + r.status + ')');
+      fromCache = r.headers.get('X-PWA-Cache') === '1';
+      return r.arrayBuffer();
+    }).then(function(buf){
+      var u = new Uint8Array(buf);
+      var magic = String.fromCharCode.apply(null, u.subarray(0,5));
+      if (magic !== 'WPWA1') throw new Error('รูปแบบไฟล์ไม่ตรง');
+      var iv = u.subarray(5,17), ct = u.subarray(17);
+      st('กำลังถอดรหัส…');
+      return crypto.subtle.decrypt({name:'AES-GCM', iv: iv}, key, ct);
+    }).then(function(gz){
+      if (typeof DecompressionStream === 'undefined')
+        throw new Error('iOS/Safari รุ่นนี้ไม่รองรับ DecompressionStream — ต้อง iOS 16.4 ขึ้นไป');
+      var ds = new DecompressionStream('gzip');
+      var w = ds.writable.getWriter(); w.write(gz); w.close();
+      return new Response(ds.readable).text();
+    }).then(function(html){
+      try { sessionStorage.setItem('pwa_from_cache', fromCache ? '1' : '0'); } catch(e) {}
+      document.open(); document.write(html); document.close();
+    });
+  }
+
+  function fail(e){
+    var m = (e && e.message) || String(e);
+    if (/decrypt|OperationError/i.test(m) || (e && e.name === 'OperationError'))
+      m = 'ถอดรหัสไม่ผ่าน — คีย์ไม่ตรงกับไฟล์บนเซิร์ฟเวอร์ (ลองวางคีย์ใหม่)';
+    err(m); $('keybox').classList.add('on'); st('เปิดไม่สำเร็จ');
+  }
+
+  function useKey(str){
+    return importKey(str).then(function(key){
+      return kvSet('key', key).then(function(){ return key; });
+    });
+  }
+
+  $('go').onclick = function(){
+    $('err').textContent = ''; $('spin').style.display='';
+    useKey($('k').value).then(openApp).catch(fail);
+  };
+
+  /* boot: #k=… ในลิงก์ (ครั้งแรก) → เก็บลงเครื่อง
+     iOS แยก storage ของ Safari กับแอปบนโฮม → ต้องคง #k ไว้ใน URL ตอนอยู่ใน Safari
+     เพื่อให้ Add to Home Screen เก็บ URL พร้อมคีย์ไปด้วย · ลบออกเฉพาะตอนเปิดเป็นแอปแล้ว */
+  var standalone = (navigator.standalone === true) ||
+                   (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  var hk = (location.hash || '').match(/[#&]k=([A-Za-z0-9_\-=]+)/);
+  var p;
+  if (hk) {
+    if (standalone) history.replaceState(null, '', location.pathname + location.search);
+    p = useKey(hk[1]);
+  } else {
+    p = kvGet('key').then(function(k){ if (!k) throw new Error('nokey'); return k; });
+  }
+  p.then(openApp).catch(function(e){
+    if (e && e.message === 'nokey') { $('spin').style.display='none'; st('ตั้งค่าครั้งแรก'); $('keybox').classList.add('on'); }
+    else fail(e);
+  });
+})();
+</script></body></html>
